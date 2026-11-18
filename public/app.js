@@ -5,6 +5,7 @@ const totalEl = document.getElementById('total');
 const updatedEl = document.getElementById('updatedAt');
 const statusEl = document.getElementById('status');
 const sourceEl = document.getElementById('source');
+const refreshBtn = document.getElementById('refreshBtn');
 
 const money = n => new Intl.NumberFormat('vi-VN').format(Math.round(n)) + ' đ';
 let prices = [];
@@ -24,7 +25,7 @@ function render() {
   sourceEl.href = p.source_url;
 }
 
-function setPrices(data) {
+function setPrices(data, manual) {
   prices = data.prices || [];
   if (!prices.length) throw new Error('No prices');
   const previous = fuelEl.value;
@@ -32,31 +33,41 @@ function setPrices(data) {
   if (prices.some(p => p.code === previous)) fuelEl.value = previous;
   render();
 
+  statusEl.classList.remove('status-error');
   if (data.refresh_error) {
-    statusEl.textContent = 'Đang dùng giá đã lưu; lần kiểm tra nguồn mới chưa thành công.';
+    statusEl.classList.add('status-error');
+    statusEl.textContent = `Đang dùng giá đã lưu; lần kiểm tra nguồn mới chưa thành công (${data.refresh_error}).`;
   } else if (data.refresh_attempted) {
     statusEl.textContent = 'Đã kiểm tra và đồng bộ giá mới nhất.';
+  } else if (manual) {
+    statusEl.textContent = 'Vừa kiểm tra cách đây ít giây, đang dùng giá mới nhất.';
   } else {
     statusEl.textContent = 'Đã tải giá mới nhất.';
   }
 }
 
 async function load(forceRefresh = false) {
+  refreshBtn.disabled = true;
+  if (forceRefresh) statusEl.textContent = 'Đang kiểm tra giá mới từ Bộ Công Thương...';
   try {
     const url = forceRefresh ? '/api/prices?refresh=true' : '/api/prices';
     const r = await fetch(url, { cache: 'no-store' });
     const body = await r.json();
     if (!r.ok) throw new Error(body.detail || 'API error');
-    setPrices(body);
+    setPrices(body, forceRefresh);
   } catch (e) {
+    statusEl.classList.add('status-error');
     statusEl.textContent = 'Không tải được giá. Vui lòng thử lại sau.';
     unitEl.textContent = '--';
     totalEl.textContent = '--';
+  } finally {
+    refreshBtn.disabled = false;
   }
 }
 
 fuelEl.addEventListener('change', render);
 litersEl.addEventListener('input', render);
+refreshBtn.addEventListener('click', () => load(true));
 load();
 
 // Check periodically while the page is open. Backend also refreshes stale data.

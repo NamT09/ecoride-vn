@@ -273,7 +273,14 @@ def prices(refresh: bool = Query(False)):
     refresh_error = None
 
     # A user request can recover a stale database between scheduled cron runs.
-    if refresh or should_refresh():
+    # A manual refresh (button) is honoured at most once every 30 seconds so it cannot hammer MOIT.
+    manual = False
+    if refresh:
+        last = get_last_checked()
+        if isinstance(last, str):
+            last = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        manual = last is None or (datetime.now(timezone.utc) - last).total_seconds() >= 30
+    if manual or should_refresh():
         refresh_attempted = True
         try:
             collect_prices()

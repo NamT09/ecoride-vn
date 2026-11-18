@@ -24,3 +24,7 @@ select:focus, input:focus { border-color: #64748b; }
 .note { padding: 4px 8px; color: #64748b; font-size: 12px; line-height: 1.5; }
 @media (max-width: 380px) { .card { padding: 18px; } h1 { font-size: 26px; } .total-box strong { font-size: 28px; } }
 .history-card h2 { margin: 0 0 8px; font-size: 18px; }
+.refresh-btn { width: 100%; margin-top: 18px; padding: 13px 16px; border: 0; border-radius: 14px; background: #0f172a; color: white; font-size: 16px; font-weight: 600; cursor: pointer; }
+.refresh-btn:hover { background: #1e293b; }
+.refresh-btn:disabled { opacity: .6; cursor: wait; }
+.status-error { color: #b45309; }
