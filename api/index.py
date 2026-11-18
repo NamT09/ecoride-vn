@@ -69,9 +69,13 @@ def parse_vnd(text: str) -> int:
 
 
 def extract_price(text: str, label: str) -> int:
+    # MOIT commonly publishes prices like:
+    # "Xăng E5RON92: không cao hơn 19.399 đồng/lít".
+    # Keep the parser tolerant of punctuation and small wording changes.
     pattern = (
-        rf"{re.escape(label)}\s*[:\-]?\s*.*?"
-        rf"(\d{{1,3}}(?:[.,]\d{{3}})+)\s*(?:đồng/lít|đ/lít)"
+        rf"{re.escape(label)}\s*[:\-]?\s*"
+        rf".*?(\d{{1,3}}(?:[.,]\d{{3}})+|\d{{4,6}})\s*"
+        rf"(?:đồng/lít|đ/lít|vnd/lít)"
     )
     m = re.search(pattern, text, re.I | re.S)
     if not m:
@@ -79,25 +83,81 @@ def extract_price(text: str, label: str) -> int:
     return parse_vnd(m.group(1))
 
 
+def _build_effective_at(day: int, month: int, year: int, hour: int = 15, minute: int = 0) -> str:
+    try:
+        dt = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError(f"Invalid effective date: {day}/{month}/{year}") from exc
+    # Vietnam local time is UTC+07:00. Keep the API value explicit.
+    return dt.replace(tzinfo=None).isoformat() + "+07:00"
+
+
+def _find_date(value: str):
+    # 12/11/2026, 12-11-2026, 12.11.2026
+    m = re.search(r"(?:ngày\s*)?(\d{1,2})[./-](\d{1,2})[./-](\d{4})", value, re.I)
+    if m:
+        return tuple(map(int, m.groups()))
+
+    # 12 tháng 11 năm 2026
+    m = re.search(
+        r"(?:ngày\s*)?(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(\d{4})",
+        value,
+        re.I,
+    )
+    if m:
+        return tuple(map(int, m.groups()))
+
+    # Titles on the MOIT news listing sometimes omit the year, e.g.
+    # "... điều hành giá xăng dầu ngày 12/11". Use the current year.
+    m = re.search(r"ngày\s*(\d{1,2})[./-](\d{1,2})(?![./-]\d)", value, re.I)
+    if m:
+        return int(m.group(1)), int(m.group(2)), datetime.now(timezone.utc).year
+    return None
+
+
 def parse_effective_at(text: str, title: str) -> str:
+    # Prefer an explicit "15h/15 giờ ... ngày ..." in the announcement body.
     patterns = [
-        r"(?:từ|áp dụng từ)\s*(?:15\s*giờ\s*00'?|15h)\s*ngày\s*(\d{1,2})[./](\d{1,2})[./](\d{4})",
-        r"(?:từ|áp dụng từ)\s*15\s*giờ\s*00'?\s*ngày\s*(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(\d{4})",
+        r"(?:áp dụng|thực hiện|điều chỉnh|từ)\s*(?:kể từ\s*)?15\s*(?:giờ|h)\s*0?0?\s*'?\s*(?:ngày\s*)?(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
+        r"(?:áp dụng|thực hiện|điều chỉnh|từ)\s*(?:kể từ\s*)?15\s*(?:giờ|h)\s*0?0?\s*(?:ngày\s*)?(\d{1,2})\s*tháng\s*(\d{1,2})\s*năm\s*(\d{4})",
+        r"(?:từ|áp dụng từ|áp dụng)\s*15h\s*ngày\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
     ]
+
     for pattern in patterns:
         m = re.search(pattern, text, re.I)
         if m:
             d, mo, y = map(int, m.groups())
-            return f"{y:04d}-{mo:02d}-{d:02d}T15:00:00+07:00"
+            return _build_effective_at(d, mo, y)
 
-    # Fallback: many MOIT titles contain the announcement date.
-    m = re.search(r"ngày\s*(\d{1,2})[./](\d{1,2})[./](\d{4})", title, re.I)
+    # The current MOIT news title can omit the year, while the page itself
+    # is still the official announcement for that day.
+    found = _find_date(title)
+    if found:
+        d, mo, y = found
+        return _build_effective_at(d, mo, y)
+
+    # Last fallback: use a date associated with the "Thời gian thực hiện"
+    # section rather than an unrelated historical date in the article.
+    m = re.search(
+        r"Thời gian thực hiện.{0,800}?(\d{1,2})[./-](\d{1,2})[./-](\d{4})",
+        text,
+        re.I | re.S,
+    )
     if m:
         d, mo, y = map(int, m.groups())
-        return f"{y:04d}-{mo:02d}-{d:02d}T15:00:00+07:00"
+        return _build_effective_at(d, mo, y)
 
     raise ValueError("Cannot determine effective date")
 
+def _announcement_date(title: str):
+    found = _find_date(title)
+    if not found:
+        return datetime.min
+    d, mo, y = found
+    try:
+        return datetime(y, mo, d)
+    except ValueError:
+        return datetime.min
 
 def discover_latest_announcement():
     r = requests.get(SOURCE_LIST, headers=HEADERS, timeout=REQUEST_TIMEOUT)
@@ -118,7 +178,11 @@ def discover_latest_announcement():
             candidates.append((title, href))
 
     if not candidates:
-        raise ValueError("No recent fuel-price announcement found on MOIT listing")
+        raise ValueError("No fuel-price announcement found on MOIT listing")
+
+    # The listing order can change. Sort by the announcement date instead of
+    # assuming the first matching link is the newest one.
+    candidates.sort(key=lambda item: _announcement_date(item[0]), reverse=True)
     return candidates[0]
 
 
@@ -131,7 +195,10 @@ def collect_prices():
 
     # MOIT has used both RON95-III and E10RON95-III wording in 2026.
     e5 = extract_price(text, "Xăng E5RON92")
-    e10 = extract_price(text, "Xăng E10RON95-III")
+    try:
+        e10 = extract_price(text, "Xăng E10RON95-III")
+    except ValueError:
+        e10 = extract_price(text, "Xăng E10 RON95-III")
     effective = parse_effective_at(text, title)
 
     now = datetime.now(timezone.utc).isoformat()
