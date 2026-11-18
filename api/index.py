@@ -69,14 +69,22 @@ def parse_vnd(text: str) -> int:
 
 
 def extract_price(text: str, label: str) -> int:
-    pattern = (
-        rf"{re.escape(label)}\s*[:\-]?\s*.*?"
-        rf"(\d{{1,3}}(?:[.,]\d{{3}})+)\s*(?:đồng/lít|đ/lít)"
-    )
-    m = re.search(pattern, text, re.I | re.S)
-    if not m:
-        raise ValueError(f"Cannot extract {label}")
-    return parse_vnd(m.group(1))
+    """Read the price printed right after `label`.
+
+    Must be anchored tightly: a lazy ".*?" can start at an earlier mention of the label
+    (e.g. in an intro sentence) and run on to the NEXT product's price.
+    """
+    num = r"(\d{1,3}(?:[.,]\d{3})+)\s*(?:đồng/lít|đ/lít)"
+    lab = re.escape(label)
+    # Preferred: "Xăng E10RON95-III: không cao hơn 19.845 đồng/lít"
+    strict = rf"{lab}\s*[:\-]?\s*(?:không\s+cao\s+hơn|tối\s+đa|là)?\s*{num}"
+    # Fallback: short gap with no digits, so we can never skip over another price.
+    loose = rf"{lab}\s*[:\-]?\s*[^\d]{{0,40}}?{num}"
+    for pattern in (strict, loose):
+        m = re.search(pattern, text, re.I)
+        if m:
+            return parse_vnd(m.group(1))
+    raise ValueError(f"Cannot extract {label}")
 
 
 _DATE = r"ngày\s*(\d{1,2})\s*(?:tháng\s*|[./-])(\d{1,2})\s*(?:năm\s*|[./-])(\d{4})"
@@ -149,6 +157,8 @@ def collect_prices():
     # MOIT has used both RON95-III and E10RON95-III wording in 2026.
     e5 = extract_price(text, "Xăng E5RON92")
     e10 = extract_price(text, "Xăng E10RON95-III")
+    if e5 == e10:
+        raise ValueError(f"E5 and E10 prices are identical ({e5}); refusing to save")
     effective = parse_effective_at(text, title)
 
     now = datetime.now(timezone.utc).isoformat()
