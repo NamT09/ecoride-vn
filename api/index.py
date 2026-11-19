@@ -134,26 +134,38 @@ def parse_effective_at(text: str, title: str) -> str:
 
 
 def discover_latest_announcement():
+    """All fuel-price announcements on the MOIT listing, newest first (by the date in the title)."""
     r = requests.get(SOURCE_LIST, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
+
+    import unicodedata
+
+    def _plain(text):
+        t = unicodedata.normalize("NFD", text.lower().replace("đ", "d"))
+        return "".join(c for c in t if unicodedata.category(c) != "Mn")
 
     candidates = []
     seen = set()
     for a in soup.find_all("a", href=True):
         title = " ".join(a.get_text(" ", strip=True).split())
         href = urljoin(SOURCE_LIST, a["href"])
-        low = title.lower()
-        if (
-            ("điều hành giá xăng dầu" in low or "điều hành giá bán xăng dầu" in low)
-            and href not in seen
-        ):
+        plain = _plain(title)
+        if re.search(r"dieu\s*han\w*\s*gia\s*(?:ban\s*)?xang\s*dau", plain) and href not in seen:
             seen.add(href)
             candidates.append((title, href))
 
     if not candidates:
         raise ValueError("No recent fuel-price announcement found on MOIT listing")
-    return candidates[0]
+
+    def title_key(item):
+        m = re.search(r"ngay\s*(\d{1,2})\s*[./-]\s*(\d{1,2})(?:\s*[./-]\s*(\d{4}))?", _plain(item[0]))
+        if not m:
+            return (0, 0, 0)
+        year = int(m.group(3) or datetime.now(timezone(timedelta(hours=7))).year)
+        return (year, int(m.group(2)), int(m.group(1)))
+
+    return sorted(candidates, key=title_key, reverse=True)[0]  # newest first -> (title, url)
 
 
 def collect_prices():
