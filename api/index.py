@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
 
@@ -133,7 +134,14 @@ def parse_effective_at(text: str, title: str) -> str:
     raise ValueError("Cannot determine effective date")
 
 
-def discover_latest_announcement():
+def _plain(text: str) -> str:
+    """Lower-case, accent-free text, so a typo in a diacritic ("điều hàng") still matches."""
+    t = unicodedata.normalize("NFD", text.lower().replace("đ", "d"))
+    return "".join(c for c in t if unicodedata.category(c) != "Mn")
+
+
+def discover_announcements():
+    """All fuel-price announcements on the MOIT listing, newest first (by the date in the title)."""
     r = requests.get(SOURCE_LIST, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -143,21 +151,31 @@ def discover_latest_announcement():
     for a in soup.find_all("a", href=True):
         title = " ".join(a.get_text(" ", strip=True).split())
         href = urljoin(SOURCE_LIST, a["href"])
-        low = title.lower()
-        if (
-            ("điều hành giá xăng dầu" in low or "điều hành giá bán xăng dầu" in low)
-            and href not in seen
-        ):
+        plain = _plain(title)
+        # Tolerant on purpose: MOIT titles contain typos (e.g. "điều hàng giá xăng dầu" on 19/11/2026).
+        if re.search(r"dieu\s*han\w*\s*gia\s*(?:ban\s*)?xang\s*dau", plain) and href not in seen:
             seen.add(href)
             candidates.append((title, href))
 
     if not candidates:
         raise ValueError("No recent fuel-price announcement found on MOIT listing")
-    return candidates[0]
+
+    # Do not trust list order: newest "ngày D/M[/Y]" in the title first (ties keep list order).
+    def title_key(item):
+        m = re.search(r"ngay\s*(\d{1,2})\s*[./-]\s*(\d{1,2})(?:\s*[./-]\s*(\d{4}))?", _plain(item[0]))
+        if not m:
+            return (0, 0, 0)
+        year = int(m.group(3) or datetime.now(timezone(timedelta(hours=7))).year)
+        return (year, int(m.group(2)), int(m.group(1)))
+
+    return sorted(candidates, key=title_key, reverse=True)  # sorted() is stable
 
 
-def collect_prices():
-    title, source_url = discover_latest_announcement()
+def discover_latest_announcement():
+    return discover_announcements()[0]
+
+
+def _collect_from(title, source_url):
     r = requests.get(source_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -177,6 +195,10 @@ def collect_prices():
     }
 
     with db() as con:
+        existing = con.execute(
+            "SELECT 1 FROM fuel_prices WHERE effective_at = %s LIMIT 1", (effective,)
+        ).fetchone()
+        is_new = existing is None
         for code, (name, price) in values.items():
             con.execute("""
                 INSERT INTO fuel_prices
@@ -191,6 +213,7 @@ def collect_prices():
         con.commit()
 
     return {
+        "is_new": is_new,
         "announcement_title": title,
         "source_url": source_url,
         "effective_at": effective,
@@ -200,6 +223,17 @@ def collect_prices():
             for code, (name, price) in values.items()
         ],
     }
+
+
+def collect_prices():
+    """Try the newest announcements in turn (max 3); a page that cannot be parsed falls through to the next."""
+    errors = []
+    for title, source_url in discover_announcements()[:3]:
+        try:
+            return _collect_from(title, source_url)
+        except Exception as e:
+            errors.append(f"{title}: {e}")
+    raise ValueError("; ".join(errors))
 
 
 def latest_rows():
@@ -283,6 +317,7 @@ def prices(refresh: bool = Query(False)):
     init_db()
     refresh_attempted = False
     refresh_error = None
+    refresh_info = None
 
     # A user request can recover a stale database between scheduled cron runs.
     # A manual refresh (button) is honoured at most once every 30 seconds so it cannot hammer MOIT.
@@ -295,7 +330,7 @@ def prices(refresh: bool = Query(False)):
     if manual or should_refresh():
         refresh_attempted = True
         try:
-            collect_prices()
+            refresh_info = collect_prices()
         except Exception as e:
             refresh_error = str(e)
 
@@ -309,6 +344,9 @@ def prices(refresh: bool = Query(False)):
         "prices": rows,
         "refresh_attempted": refresh_attempted,
         "refresh_error": refresh_error,
+        "refresh_new_data": bool(refresh_info and refresh_info["is_new"]),
+        "announcement_title": refresh_info["announcement_title"] if refresh_info else None,
+        "announcement_effective_at": refresh_info["effective_at"] if refresh_info else None,
         "last_checked": get_last_checked(),
     }
 
