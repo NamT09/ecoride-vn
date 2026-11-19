@@ -1,6 +1,5 @@
 import os
 import re
-import unicodedata
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
 
@@ -134,13 +133,7 @@ def parse_effective_at(text: str, title: str) -> str:
     raise ValueError("Cannot determine effective date")
 
 
-def _plain(text: str) -> str:
-    """Lower-case, accent-free text, so a typo in a diacritic ("điều hàng") still matches."""
-    t = unicodedata.normalize("NFD", text.lower().replace("đ", "d"))
-    return "".join(c for c in t if unicodedata.category(c) != "Mn")
-
-
-def discover_announcements():
+def discover_latest_announcement():
     """All fuel-price announcements on the MOIT listing, newest first (by the date in the title)."""
     r = requests.get(SOURCE_LIST, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
@@ -171,11 +164,8 @@ def discover_announcements():
     return sorted(candidates, key=title_key, reverse=True)  # sorted() is stable
 
 
-def discover_latest_announcement():
-    return discover_announcements()[0]
-
-
-def _collect_from(title, source_url):
+def collect_prices():
+    title, source_url = discover_latest_announcement()
     r = requests.get(source_url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
@@ -195,10 +185,6 @@ def _collect_from(title, source_url):
     }
 
     with db() as con:
-        existing = con.execute(
-            "SELECT 1 FROM fuel_prices WHERE effective_at = %s LIMIT 1", (effective,)
-        ).fetchone()
-        is_new = existing is None
         for code, (name, price) in values.items():
             con.execute("""
                 INSERT INTO fuel_prices
@@ -213,7 +199,6 @@ def _collect_from(title, source_url):
         con.commit()
 
     return {
-        "is_new": is_new,
         "announcement_title": title,
         "source_url": source_url,
         "effective_at": effective,
@@ -223,17 +208,6 @@ def _collect_from(title, source_url):
             for code, (name, price) in values.items()
         ],
     }
-
-
-def collect_prices():
-    """Try the newest announcements in turn (max 3); a page that cannot be parsed falls through to the next."""
-    errors = []
-    for title, source_url in discover_announcements()[:3]:
-        try:
-            return _collect_from(title, source_url)
-        except Exception as e:
-            errors.append(f"{title}: {e}")
-    raise ValueError("; ".join(errors))
 
 
 def latest_rows():
@@ -317,7 +291,6 @@ def prices(refresh: bool = Query(False)):
     init_db()
     refresh_attempted = False
     refresh_error = None
-    refresh_info = None
 
     # A user request can recover a stale database between scheduled cron runs.
     # A manual refresh (button) is honoured at most once every 30 seconds so it cannot hammer MOIT.
@@ -330,7 +303,7 @@ def prices(refresh: bool = Query(False)):
     if manual or should_refresh():
         refresh_attempted = True
         try:
-            refresh_info = collect_prices()
+            collect_prices()
         except Exception as e:
             refresh_error = str(e)
 
@@ -344,9 +317,6 @@ def prices(refresh: bool = Query(False)):
         "prices": rows,
         "refresh_attempted": refresh_attempted,
         "refresh_error": refresh_error,
-        "refresh_new_data": bool(refresh_info and refresh_info["is_new"]),
-        "announcement_title": refresh_info["announcement_title"] if refresh_info else None,
-        "announcement_effective_at": refresh_info["effective_at"] if refresh_info else None,
         "last_checked": get_last_checked(),
     }
 
